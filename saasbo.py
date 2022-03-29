@@ -1,4 +1,5 @@
 import time
+from tkinter import YES
 import warnings
 from copy import deepcopy
 
@@ -11,6 +12,8 @@ from jax.scipy.stats import norm
 from numpyro.util import enable_x64
 from scipy.optimize import fmin_l_bfgs_b
 from scipy.stats import qmc
+import matplotlib
+import matplotlib.pyplot as plt
 
 from saasgp import SAASGP
 
@@ -72,12 +75,43 @@ def optimize_ei(gp, y_target, xi=0.0, num_restarts_ei=5, num_init=5000):
     return x_best
 
 
+def generate_initial_evaluations(f, lb, ub, n_perturb_samples, n_sobol_samples, seed, frac_perturb_dims):
+
+    input_dim = len(lb)
+    
+    # first, evaluate the function at the midpoint
+    X = np.expand_dims((lb + ub)/2, 0)
+
+    # then, perturb the specified number of samples
+    for i in range(n_perturb_samples-1):
+        x = (lb + ub)/2
+        dims_to_perturb = np.random.choice(
+            np.arange(input_dim), 
+            size = int(frac_perturb_dims * input_dim), 
+            replace = False)
+        x[dims_to_perturb] = lb[dims_to_perturb]
+        x = np.expand_dims(x, 0)
+        X = np.vstack((X, x))
+
+    # generate the remaining samples from Sobol sequence
+    with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
+        X_sobol = qmc.Sobol(len(lb), scramble=True, seed=seed).random(n_sobol_samples)
+
+    print('shape of X, shape of X_sobol', np.shape(X), np.shape(X_sobol))
+
+    X = np.vstack((X, X_sobol))
+    Y = np.array([f(lb + (ub - lb) * x) for x in X])
+
+    return X, Y
+
+
 def run_saasbo(
     f,
     lb,
     ub,
     max_evals,
     num_init_evals,
+    results_folder,
     seed=None,
     alpha=0.1,
     num_warmup=512,
@@ -86,6 +120,9 @@ def run_saasbo(
     num_restarts_ei=5,
     kernel="rbf",
     device="cpu",
+    frac_perturb = 0, 
+    frac_perturb_dims = 0, 
+    plot_title = ''
 ):
     """
     Run SAASBO and approximately minimize f.
@@ -123,6 +160,8 @@ def run_saasbo(
     if device not in ["cpu", "gpu"]:
         raise ValueError("The device must be cpu or gpu.")
 
+    plot_title += '\n fraction of initial samples perturbed: {}; \n fraction of input dimensions perturbed: {}'.format(frac_perturb, frac_perturb_dims)
+
     numpyro.set_platform(device)
     enable_x64()
     numpyro.set_host_device_count(1)
@@ -131,10 +170,21 @@ def run_saasbo(
     num_exceptions = 0
 
     # Initial queries are drawn from a Sobol sequence
-    with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
-        X = qmc.Sobol(len(lb), scramble=True, seed=seed).random(num_init_evals)
+    # with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
+    #     X = qmc.Sobol(len(lb), scramble=True, seed=seed).random(num_init_evals)
 
-    Y = np.array([f(lb + (ub - lb) * x) for x in X])
+    # Y = np.array([f(lb + (ub - lb) * x) for x in X])
+
+    # generate initial queries
+    X, Y = generate_initial_evaluations(
+        f = f, 
+        lb = lb, 
+        ub = ub, 
+        n_perturb_samples = int(num_init_evals * frac_perturb),
+        n_sobol_samples = num_init_evals - int(num_init_evals * frac_perturb),
+        seed = seed,
+        frac_perturb_dims = frac_perturb_dims
+        )
 
     print("Starting SAASBO optimization run.")
     print(f"First {num_init_evals} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
@@ -183,8 +233,34 @@ def run_saasbo(
         X = np.vstack((X, deepcopy(x_next[None, :])))
         Y = np.hstack((Y, deepcopy(y_next)))
 
+        save_outputs_and_plot(X, Y, results_folder, seed, 
+            frac_perturb, frac_perturb_dims,
+            plot_title)
+
         print(f"Observed function value: {y_next:.3f}, Best function value seen thus far: {Y.min():.3f}")
 
         del gp  # Free memory
 
     return lb + (ub - lb) * X, Y
+
+
+def save_outputs_and_plot(X, Y, results_folder, seed, frac_perturb, frac_perturb_dims, plot_title):
+    
+    frac_perturb_str = str(frac_perturb).replace('.', '')
+    frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
+    
+    np.save(results_folder + 'X/X_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed) + '.npy', X)
+    np.save(results_folder + 'output_at_X/output_at_X_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed)  + '.npy', Y)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(np.minimum.accumulate(Y), color="b", label="SAASBO")
+    ax.plot([0, 50], [-3.322, -3.322], "--", c="g", lw=3, label="Optimal value")
+    ax.grid(True)
+    if plot_title is not None:
+        ax.set_title(plot_title, fontsize=20)
+    ax.set_xlabel("Number of evaluations", fontsize=20)
+    ax.set_xlim([0, 50])
+    ax.set_ylabel("Best value found", fontsize=20)
+    ax.set_ylim([-3.5, -0.5])
+    ax.legend(fontsize=18)
+    fig.savefig(results_folder + 'visualization_' + str(seed)+ '_' + frac_perturb_str + '_' + frac_perturb_dims_str)
