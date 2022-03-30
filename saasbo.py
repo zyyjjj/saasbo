@@ -89,7 +89,11 @@ def generate_initial_evaluations(f, lb, ub, n_perturb_samples, n_sobol_samples, 
             np.arange(input_dim), 
             size = int(frac_perturb_dims * input_dim), 
             replace = False)
-        x[dims_to_perturb] = lb[dims_to_perturb]
+        for dim_to_perturb in dims_to_perturb:
+            if np.random.randint(0,2) == 0:
+                x[dim_to_perturb] = lb[dim_to_perturb]
+            else:
+                x[dim_to_perturb] = ub[dim_to_perturb]
         x = np.expand_dims(x, 0)
         X = np.vstack((X, x))
 
@@ -259,7 +263,7 @@ def save_outputs_and_plot(X, Y, results_folder, seed, frac_perturb, frac_perturb
     if plot_title is not None:
         ax.set_title(plot_title, fontsize=20)
     ax.set_xlabel("Number of evaluations", fontsize=20)
-    ax.set_xlim([0, 50])
+    ax.set_xlim([0, 100])
     ax.set_ylabel("Best value found", fontsize=20)
     ax.set_ylim([-3.5, -0.5])
     ax.legend(fontsize=18)

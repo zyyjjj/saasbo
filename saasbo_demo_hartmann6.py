@@ -55,7 +55,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
     parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument("--max-evals", default=50, type=int)
+    parser.add_argument("--max-evals", default=100, type=int)
     parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')
     parser.add_argument("--frac_perturb_samples", default = 0.5, type = float, 
         help = 'fraction of initial samples to generate using perturbation-from-baseline approach')
