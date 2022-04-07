@@ -26,6 +26,9 @@ def main(args):
         os.makedirs(results_folder + "X/")
     if not os.path.exists(results_folder + "output_at_X/"):
         os.makedirs(results_folder + "output_at_X/")
+    if not os.path.exists(results_folder + "median_lengthscales/"):
+        os.makedirs(results_folder + "median_lengthscales/")
+
 
     run_saasbo(
         hartmann6_50,

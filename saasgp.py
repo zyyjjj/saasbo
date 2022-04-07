@@ -7,7 +7,7 @@ import jax.random as random
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from jax import jit, vmap
+from jax import jit, vmap # jit: just-in-time compilation; vmap: vectorizing map
 from jax.scipy.linalg import cho_factor, cho_solve, solve_triangular
 from numpyro.diagnostics import summary
 from numpyro.infer import MCMC, NUTS
@@ -176,6 +176,7 @@ class SAASGP(object):
         return self
 
     # compute predictions at X_test using inferred SAAS hyperparameters
+    # namely, get the sampled SAAS hp's, predict the mean and variance of the function at the test point
     def posterior(self, X_test):
         if self.Ls is None:
             self.compute_choleskys(chunk_size=8)
@@ -194,5 +195,6 @@ class SAASGP(object):
         )
 
         mean, var = chunk_vmap(predict, vmap_args, chunk_size=8)
+        # print('posterior mean and variance', mean, var)
 
         return mean, var

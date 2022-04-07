@@ -21,6 +21,7 @@ from saasgp import SAASGP
 def ei(x, y_target, gp, xi=0.0):
     # Expected Improvement (EI)
     mu, var = gp.posterior(x)
+    # print('computing EI, mean and var at test point is ', mu, var)
     std = jnp.maximum(jnp.sqrt(var), 1e-6)
     improve = y_target - xi - mu
     scaled = improve / std
@@ -237,9 +238,12 @@ def run_saasbo(
         X = np.vstack((X, deepcopy(x_next[None, :])))
         Y = np.hstack((Y, deepcopy(y_next)))
 
-        save_outputs_and_plot(X, Y, results_folder, seed, 
+        # TODO: save intermediate kernel lengthscales 
+        save_outputs_and_plot(gp, X, Y, results_folder, seed, 
             frac_perturb, frac_perturb_dims,
-            plot_title)
+            plot_title = plot_title)
+        
+        trace_important_dims(gp, thinning)
 
         print(f"Observed function value: {y_next:.3f}, Best function value seen thus far: {Y.min():.3f}")
 
@@ -248,23 +252,43 @@ def run_saasbo(
     return lb + (ub - lb) * X, Y
 
 
-def save_outputs_and_plot(X, Y, results_folder, seed, frac_perturb, frac_perturb_dims, plot_title):
+def save_outputs_and_plot(gp, X, Y, results_folder, seed, frac_perturb, frac_perturb_dims, to_plot=False, plot_title=None):
     
     frac_perturb_str = str(frac_perturb).replace('.', '')
     frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
+
+    ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
+    ell_median = jnp.median(ell, 0)
     
     np.save(results_folder + 'X/X_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed) + '.npy', X)
     np.save(results_folder + 'output_at_X/output_at_X_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed)  + '.npy', Y)
+    np.save(results_folder + 'median_lengthscales/median_lengthscales_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed)  + '.npy', ell_median)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(np.minimum.accumulate(Y), color="b", label="SAASBO")
-    ax.plot([0, 50], [-3.322, -3.322], "--", c="g", lw=3, label="Optimal value")
-    ax.grid(True)
-    if plot_title is not None:
-        ax.set_title(plot_title, fontsize=20)
-    ax.set_xlabel("Number of evaluations", fontsize=20)
-    ax.set_xlim([0, 100])
-    ax.set_ylabel("Best value found", fontsize=20)
-    ax.set_ylim([-3.5, -0.5])
-    ax.legend(fontsize=18)
-    fig.savefig(results_folder + 'visualization_' + str(seed)+ '_' + frac_perturb_str + '_' + frac_perturb_dims_str)
+    if to_plot:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(np.minimum.accumulate(Y), color="b", label="SAASBO")
+        ax.plot([0, 50], [-3.322, -3.322], "--", c="g", lw=3, label="Optimal value")
+        ax.grid(True)
+        if plot_title is not None:
+            ax.set_title(plot_title, fontsize=20)
+        ax.set_xlabel("Number of evaluations", fontsize=20)
+        ax.set_xlim([0, 100])
+        ax.set_ylabel("Best value found", fontsize=20)
+        ax.set_ylim([-3.5, -0.5])
+        ax.legend(fontsize=18)
+        fig.savefig(results_folder + 'visualization_' + str(seed)+ '_' + frac_perturb_str + '_' + frac_perturb_dims_str)
+
+
+# TODO: write a function to trace the identification of important dimensions (over iters)
+# where "important" means median length scale is below some cutoff
+# need to log the median length scale
+
+
+
+def trace_important_dims(gp, thinning):
+
+    ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
+    ell_median = jnp.median(ell, 0)
+
+    for i in ell_median.argsort()[:10]:
+        print(f"Parameter {i:2} Median lengthscale = {ell_median[i]:.2e}")
