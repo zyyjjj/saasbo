@@ -2,6 +2,7 @@ import time
 from tkinter import YES
 import warnings
 from copy import deepcopy
+import os
 
 import jax.lax as lax
 import jax.numpy as jnp
@@ -14,6 +15,7 @@ from scipy.optimize import fmin_l_bfgs_b
 from scipy.stats import qmc
 import matplotlib
 import matplotlib.pyplot as plt
+import pdb
 
 from saasgp import SAASGP
 
@@ -76,38 +78,66 @@ def optimize_ei(gp, y_target, xi=0.0, num_restarts_ei=5, num_init=5000):
     return x_best
 
 
-def generate_initial_evaluations(f, lb, ub, n_perturb_samples, n_sobol_samples, seed, frac_perturb_dims):
+def generate_initial_evaluations(f, 
+        lb, ub, 
+        n_perturb_samples, n_sobol_samples, 
+        seed, 
+        frac_perturb_dims,
+        perturb_dims_protocol, # 'random' or 'dyadic'
+        perturb_direction, # 'ub_only' or 'ub_and_lb'
+        true_important_dims = None
+        ):
+    
+    # TODO: eventually modify this function to allow dyadic policy too
 
     input_dim = len(lb)
-    
-    # first, evaluate the function at the midpoint
-    X = np.expand_dims((lb + ub)/2, 0)
 
-    # then, perturb the specified number of samples
-    for i in range(n_perturb_samples-1):
-        x = (lb + ub)/2
-        dims_to_perturb = np.random.choice(
-            np.arange(input_dim), 
-            size = int(frac_perturb_dims * input_dim), 
-            replace = False)
-        for dim_to_perturb in dims_to_perturb:
-            if np.random.randint(0,2) == 0:
-                x[dim_to_perturb] = lb[dim_to_perturb]
-            else:
-                x[dim_to_perturb] = ub[dim_to_perturb]
-        x = np.expand_dims(x, 0)
-        X = np.vstack((X, x))
+    avg_num_important_dims_perturbed = 0
+
+    X = None
+
+    if n_perturb_samples > 0:
+    
+        # first, evaluate the function at the midpoint
+        X = np.expand_dims((lb + ub)/2, 0)
+
+        # then, perturb the specified number of samples
+        for i in range(n_perturb_samples-1):
+            x = (lb + ub)/2
+
+            if perturb_dims_protocol == 'random':
+                dims_to_perturb = np.random.choice(
+                    np.arange(input_dim), 
+                    size = int(frac_perturb_dims * input_dim), 
+                    replace = False)
+                avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
+            
+                if perturb_direction == 'ub_and_lb':
+                    for dim_to_perturb in dims_to_perturb:
+                        if np.random.randint(0,2) == 0:
+                            x[dim_to_perturb] = lb[dim_to_perturb]
+                        else:
+                            x[dim_to_perturb] = ub[dim_to_perturb]
+                elif perturb_direction == 'ub_only':
+                    x[dims_to_perturb] = ub[dims_to_perturb]
+            
+            x = np.expand_dims(x, 0)
+            X = np.vstack((X, x))
+        
+        if n_perturb_samples > 1:
+            avg_num_important_dims_perturbed /= n_perturb_samples - 1
 
     # generate the remaining samples from Sobol sequence
     with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
         X_sobol = qmc.Sobol(len(lb), scramble=True, seed=seed).random(n_sobol_samples)
 
-    print('shape of X, shape of X_sobol', np.shape(X), np.shape(X_sobol))
-
-    X = np.vstack((X, X_sobol))
+    if X is None:
+        X = X_sobol
+    else:
+        X = np.vstack((X, X_sobol))
     Y = np.array([f(lb + (ub - lb) * x) for x in X])
 
-    return X, Y
+    return X, Y, avg_num_important_dims_perturbed
 
 
 def run_saasbo(
@@ -117,6 +147,9 @@ def run_saasbo(
     max_evals,
     num_init_evals,
     results_folder,
+    true_important_dims, 
+    perturb_dims_protocol,
+    perturb_direction,
     seed=None,
     alpha=0.1,
     num_warmup=512,
@@ -174,6 +207,9 @@ def run_saasbo(
     max_exceptions = 3
     num_exceptions = 0
 
+    ell_median_history = []
+    ell_rank_history = []
+
     # Initial queries are drawn from a Sobol sequence
     # with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
     #     X = qmc.Sobol(len(lb), scramble=True, seed=seed).random(num_init_evals)
@@ -181,18 +217,24 @@ def run_saasbo(
     # Y = np.array([f(lb + (ub - lb) * x) for x in X])
 
     # generate initial queries
-    X, Y = generate_initial_evaluations(
+    X, Y, avg_num_important_dims_perturbed = generate_initial_evaluations(
         f = f, 
         lb = lb, 
         ub = ub, 
         n_perturb_samples = int(num_init_evals * frac_perturb),
         n_sobol_samples = num_init_evals - int(num_init_evals * frac_perturb),
         seed = seed,
-        frac_perturb_dims = frac_perturb_dims
+        frac_perturb_dims = frac_perturb_dims, 
+        perturb_dims_protocol = perturb_dims_protocol, 
+        perturb_direction = perturb_direction,
+        true_important_dims = true_important_dims
         )
 
     print("Starting SAASBO optimization run.")
     print(f"First {num_init_evals} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
+    print(f"{int(num_init_evals * frac_perturb)} perturbed, average number of important dimensions perturbed is {avg_num_important_dims_perturbed}")
+    print('protocol for selecting which dimensions to perturb: ', perturb_dims_protocol, ', perturb direction: ', perturb_direction)
+
 
     while len(Y) < max_evals:
         print(f"=== Iteration {len(Y)} ===", flush=True)
@@ -238,8 +280,20 @@ def run_saasbo(
         X = np.vstack((X, deepcopy(x_next[None, :])))
         Y = np.hstack((Y, deepcopy(y_next)))
 
+
+        # get the NUTS samples of inverse squared length scales for each dimension, thinned out
+        ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
+        # record important statistics: median, average rank of each dimension?
+        # pdb.set_trace()
+        ell_median = jnp.median(ell, 0)
+        ell_rank = jnp.argsort(ell).mean(0)
+
+        ell_median_history.append(ell_median)
+        ell_rank_history.append(ell_rank)
+
         # TODO: save intermediate kernel lengthscales 
-        save_outputs_and_plot(gp, X, Y, results_folder, seed, 
+        save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_important_dims_perturbed,
+            results_folder, seed, 
             frac_perturb, frac_perturb_dims,
             plot_title = plot_title)
         
@@ -252,17 +306,30 @@ def run_saasbo(
     return lb + (ub - lb) * X, Y
 
 
-def save_outputs_and_plot(gp, X, Y, results_folder, seed, frac_perturb, frac_perturb_dims, to_plot=False, plot_title=None):
+def save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_important_dims_perturbed,
+        results_folder, seed, frac_perturb, frac_perturb_dims, 
+        to_plot=False, plot_title=None):
     
     frac_perturb_str = str(frac_perturb).replace('.', '')
     frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
 
-    ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
-    ell_median = jnp.median(ell, 0)
+    if not os.path.exists(results_folder + frac_perturb_str + '_' + frac_perturb_dims_str + "/"):
+        os.makedirs(results_folder + frac_perturb_str + '_' + frac_perturb_dims_str + "/")
+    save_folder = results_folder + frac_perturb_str + '_' + frac_perturb_dims_str + "/" + str(seed) + "/"
+    if not os.path.exists(save_folder):
+        os.makedirs(save_folder)
     
-    np.save(results_folder + 'X/X_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed) + '.npy', X)
-    np.save(results_folder + 'output_at_X/output_at_X_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed)  + '.npy', Y)
-    np.save(results_folder + 'median_lengthscales/median_lengthscales_' + frac_perturb_str + '_' + frac_perturb_dims_str + '_' + str(seed)  + '.npy', ell_median)
+    np.save(save_folder + 'X_' + frac_perturb_str + '_' + frac_perturb_dims_str \
+        + '_' + str(seed) + '.npy', X)
+    np.save(save_folder + 'output_at_X_' + frac_perturb_str + '_' + frac_perturb_dims_str \
+        + '_' + str(seed)  + '.npy', Y)
+    np.save(save_folder + 'median_lengthscales_' + frac_perturb_str + '_' + frac_perturb_dims_str \
+        + '_' + str(seed)  + '.npy', ell_median_history)
+    np.save(save_folder + 'lengthscale_rankings_' + frac_perturb_str + '_' + frac_perturb_dims_str \
+        + '_' + str(seed)  + '.npy', ell_rank_history)
+    np.save(save_folder + 'avg_num_important_dims_perturbed_' + frac_perturb_str + '_' + frac_perturb_dims_str \
+        + '_' + str(seed)  + '.npy', avg_num_important_dims_perturbed)
+
 
     if to_plot:
         fig, ax = plt.subplots(figsize=(8, 6))
