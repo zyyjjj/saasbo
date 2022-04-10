@@ -1,8 +1,7 @@
-import time
+import time, os, itertools, math
 from tkinter import YES
 import warnings
 from copy import deepcopy
-import os
 
 import jax.lax as lax
 import jax.numpy as jnp
@@ -359,3 +358,33 @@ def trace_important_dims(gp, thinning):
 
     for i in ell_median.argsort()[:10]:
         print(f"Parameter {i:2} Median lengthscale = {ell_median[i]:.2e}")
+
+def get_dyadic_dims(n_dims):
+    # INPUT: n_dim, the number of total dimensions of the problem (e.g., 50 or 100)
+    # OUTPUT: a nested list of dimensions to perturb at each round; 
+    #         the length of the list is equal to the length of the binary representation of n_dim
+
+    l = int(math.log2(n_dims)) + 1
+
+    # generate list of length (l-1) strings with all possible combinations of 0's and 1's in each digit
+    base_strings = list(''.join(comb) for comb in itertools.product('01', repeat = l-1))
+    
+    dyadic_dims = []
+    for loc in range(l):
+        # insert '1' into location loc in each string in base_digits
+        # then convert to int
+        
+        single_set = []
+        
+        for base_string in base_strings:
+            dim_after_insertion = int(''.join((base_string[:loc], '1', base_string[loc:])), 2)
+            if dim_after_insertion < n_dims:
+                single_set.append(dim_after_insertion)
+        
+        dyadic_dims.append(single_set)
+    
+    return dyadic_dims
+
+
+# if __name__ == '__main__':
+#     print(get_dyadic_dims(50))
