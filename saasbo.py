@@ -79,52 +79,48 @@ def optimize_ei(gp, y_target, xi=0.0, num_restarts_ei=5, num_init=5000):
 
 def generate_initial_evaluations(f, 
         lb, ub, 
-        n_perturb_samples, n_sobol_samples, 
         seed, 
-        frac_perturb_dims,
         perturb_dims_protocol, # 'random' or 'dyadic'
         perturb_direction, # 'ub_only' or 'ub_and_lb'
+        frac_perturb_dims,
+        n_perturb_samples = None, n_sobol_samples = None, # TODO: n_perturb_samples is fixed for the dyadic policy
         true_important_dims = None
         ):
     
-    # TODO: eventually modify this function to allow dyadic policy too
-
     input_dim = len(lb)
-
     avg_num_important_dims_perturbed = 0
-
     X = None
 
     if n_perturb_samples > 0:
     
         # first, evaluate the function at the midpoint
         X = np.expand_dims((lb + ub)/2, 0)
+        
+        # if perturbation protocol is random, perturb the specified number of samples
+        if perturb_dims_protocol == 'random':
+            for i in range(n_perturb_samples-1):
+                x = (lb + ub)/2
 
-        # then, perturb the specified number of samples
-        for i in range(n_perturb_samples-1):
-            x = (lb + ub)/2
-
-            if perturb_dims_protocol == 'random':
                 dims_to_perturb = np.random.choice(
                     np.arange(input_dim), 
                     size = int(frac_perturb_dims * input_dim), 
                     replace = False)
-                avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
-            
-                if perturb_direction == 'ub_and_lb':
-                    for dim_to_perturb in dims_to_perturb:
-                        if np.random.randint(0,2) == 0:
-                            x[dim_to_perturb] = lb[dim_to_perturb]
-                        else:
-                            x[dim_to_perturb] = ub[dim_to_perturb]
-                elif perturb_direction == 'ub_only':
-                    x[dims_to_perturb] = ub[dims_to_perturb]
-            
-            x = np.expand_dims(x, 0)
-            X = np.vstack((X, x))
         
-        if n_perturb_samples > 1:
-            avg_num_important_dims_perturbed /= n_perturb_samples - 1
+                x = np.expand_dims(perturb_dims(x, lb, ub, dims_to_perturb, perturb_direction), 0)
+                X = np.vstack((X, x))
+                avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
+
+        # if perturbation policy is dyadic, 
+        elif perturb_dims_protocol == 'dyadic':
+            dims_to_perturb_list = get_dyadic_dims(input_dim)
+            for dims_to_perturb in dims_to_perturb_list:
+                x = (lb + ub)/2
+                x = np.expand_dims(perturb_dims(x, lb, ub, dims_to_perturb, perturb_direction), 0)
+                X = np.vstack((X, x))
+                avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
+        
+    if n_perturb_samples > 1:
+        avg_num_important_dims_perturbed /= n_perturb_samples - 1
 
     # generate the remaining samples from Sobol sequence
     with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
@@ -137,6 +133,19 @@ def generate_initial_evaluations(f,
     Y = np.array([f(lb + (ub - lb) * x) for x in X])
 
     return X, Y, avg_num_important_dims_perturbed
+
+
+def perturb_dims(x, lb, ub, dims_to_perturb, perturb_direction):
+    if perturb_direction == 'ub_and_lb':
+        for dim_to_perturb in dims_to_perturb:
+            if np.random.randint(0,2) == 0:
+                x[dim_to_perturb] = lb[dim_to_perturb]
+            else:
+                x[dim_to_perturb] = ub[dim_to_perturb]
+    elif perturb_direction == 'ub_only':
+        x[dims_to_perturb] = ub[dims_to_perturb]
+    
+    return x
 
 
 def run_saasbo(
@@ -157,8 +166,8 @@ def run_saasbo(
     num_restarts_ei=5,
     kernel="rbf",
     device="cpu",
-    frac_perturb = 0, 
-    frac_perturb_dims = 0, 
+    frac_perturb = None, 
+    frac_perturb_dims = None, 
     plot_title = ''
 ):
     """
@@ -197,7 +206,7 @@ def run_saasbo(
     if device not in ["cpu", "gpu"]:
         raise ValueError("The device must be cpu or gpu.")
 
-    plot_title += '\n fraction of initial samples perturbed: {}; \n fraction of input dimensions perturbed: {}'.format(frac_perturb, frac_perturb_dims)
+    # plot_title += '\n fraction of initial samples perturbed: {}; \n fraction of input dimensions perturbed: {}'.format(frac_perturb, frac_perturb_dims)
 
     numpyro.set_platform(device)
     enable_x64()
@@ -216,22 +225,30 @@ def run_saasbo(
     # Y = np.array([f(lb + (ub - lb) * x) for x in X])
 
     # generate initial queries
+
+    if perturb_dims_protocol == 'random':
+        n_perturb_samples = int(num_init_evals * frac_perturb)
+        n_sobol_samples = num_init_evals - int(num_init_evals * frac_perturb)
+    elif perturb_dims_protocol == 'dyadic':
+        n_perturb_samples = int(math.log2(len(lb))) + 2
+        n_sobol_samples = 0
+
     X, Y, avg_num_important_dims_perturbed = generate_initial_evaluations(
         f = f, 
         lb = lb, 
         ub = ub, 
-        n_perturb_samples = int(num_init_evals * frac_perturb),
-        n_sobol_samples = num_init_evals - int(num_init_evals * frac_perturb),
         seed = seed,
-        frac_perturb_dims = frac_perturb_dims, 
         perturb_dims_protocol = perturb_dims_protocol, 
         perturb_direction = perturb_direction,
+        frac_perturb_dims = frac_perturb_dims, 
+        n_perturb_samples = n_perturb_samples,
+        n_sobol_samples = n_sobol_samples,
         true_important_dims = true_important_dims
         )
 
     print("Starting SAASBO optimization run.")
-    print(f"First {num_init_evals} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
-    print(f"{int(num_init_evals * frac_perturb)} perturbed, average number of important dimensions perturbed is {avg_num_important_dims_perturbed}")
+    print(f"First {len(Y)} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
+    # print(f"{int(num_init_evals * frac_perturb)} perturbed, average number of important dimensions perturbed is {avg_num_important_dims_perturbed}")
     print('protocol for selecting which dimensions to perturb: ', perturb_dims_protocol, ', perturb direction: ', perturb_direction)
 
 
@@ -265,6 +282,7 @@ def run_saasbo(
             # do EI optimization using LBFGS
             x_next = optimize_ei(gp=gp, y_target=y_target, xi=0.0, num_restarts_ei=num_restarts_ei, num_init=5000)
             print(f"Optimizing EI took {time.time() - start:.2f} seconds")
+
         except Exception:
             num_exceptions += 1
             if num_exceptions <= max_exceptions:
@@ -279,7 +297,6 @@ def run_saasbo(
         X = np.vstack((X, deepcopy(x_next[None, :])))
         Y = np.hstack((Y, deepcopy(y_next)))
 
-
         # get the NUTS samples of inverse squared length scales for each dimension, thinned out
         ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
         # record important statistics: median, average rank of each dimension?
@@ -290,10 +307,11 @@ def run_saasbo(
         ell_median_history.append(ell_median)
         ell_rank_history.append(ell_rank)
 
-        # TODO: save intermediate kernel lengthscales 
         save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_important_dims_perturbed,
             results_folder, seed, 
             frac_perturb, frac_perturb_dims,
+            perturb_dims_protocol,
+            perturb_direction,
             plot_title = plot_title)
         
         trace_important_dims(gp, thinning)
@@ -307,14 +325,23 @@ def run_saasbo(
 
 def save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_important_dims_perturbed,
         results_folder, seed, frac_perturb, frac_perturb_dims, 
+        perturb_dims_protocol,
+        perturb_direction,
         to_plot=False, plot_title=None):
     
-    frac_perturb_str = str(frac_perturb).replace('.', '')
-    frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
+    if frac_perturb is not None:
+        frac_perturb_str = str(frac_perturb).replace('.', '')
+    else:
+        frac_perturb_str = ''
+    if frac_perturb_dims is not None:
+        frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
+    else:
+        frac_perturb_dims_str = ''
 
-    if not os.path.exists(results_folder + frac_perturb_str + '_' + frac_perturb_dims_str + "/"):
-        os.makedirs(results_folder + frac_perturb_str + '_' + frac_perturb_dims_str + "/")
-    save_folder = results_folder + frac_perturb_str + '_' + frac_perturb_dims_str + "/" + str(seed) + "/"
+    if not os.path.exists(results_folder + perturb_dims_protocol + frac_perturb_str + '_' + frac_perturb_dims_str + "/"):
+        os.makedirs(results_folder + perturb_dims_protocol + frac_perturb_str + '_' + frac_perturb_dims_str + "/")
+    save_folder = results_folder + perturb_dims_protocol + frac_perturb_str + '_' + frac_perturb_dims_str + "/" \
+        + perturb_direction + str(seed) + "/"
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
     
@@ -344,13 +371,6 @@ def save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_im
         ax.legend(fontsize=18)
         fig.savefig(results_folder + 'visualization_' + str(seed)+ '_' + frac_perturb_str + '_' + frac_perturb_dims_str)
 
-
-# TODO: write a function to trace the identification of important dimensions (over iters)
-# where "important" means median length scale is below some cutoff
-# need to log the median length scale
-
-
-
 def trace_important_dims(gp, thinning):
 
     ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
@@ -360,9 +380,11 @@ def trace_important_dims(gp, thinning):
         print(f"Parameter {i:2} Median lengthscale = {ell_median[i]:.2e}")
 
 def get_dyadic_dims(n_dims):
-    # INPUT: n_dim, the number of total dimensions of the problem (e.g., 50 or 100)
-    # OUTPUT: a nested list of dimensions to perturb at each round; 
-    #         the length of the list is equal to the length of the binary representation of n_dim
+    """
+    INPUT: n_dim, the number of total dimensions of the problem (e.g., 50 or 100)
+    OUTPUT: a nested list of dimensions to perturb at each round; 
+            the length of the list is equal to the length of the binary representation of n_dim
+    """
 
     l = int(math.log2(n_dims)) + 1
 
