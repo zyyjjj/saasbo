@@ -7,7 +7,7 @@ import sys, os
 from types import SimpleNamespace
 from multiprocessing import Pool
 
-from hartmann import hartmann6_50, hartmann6_1000
+from branin import branin_1000
 from saasbo import run_saasbo
 
 def wrapper(num_init_evals, max_evals, perturb_dims_protocol, perturb_direction, seed, device, frac_perturb_samples, frac_perturb_dims):
@@ -18,26 +18,26 @@ def wrapper(num_init_evals, max_evals, perturb_dims_protocol, perturb_direction,
     main(args)
 
 
-# demonstrate how to run SAASBO on the Hartmann6 function embedded in D=1000 dimensions
+# demonstrate how to run SAASBO on the Hartmann6 function embedded in D=50 dimensions
 def main(args):
 
-    lb, ub = np.zeros(1000), np.ones(1000)
-
+    lb = np.hstack((-5 * np.ones(500), 0 * np.ones(500)))   # lower bounds for input domain
+    ub = np.hstack((10 * np.ones(500), 15 * np.ones(500)))  # upper bounds for input domain
+    
     script_dir = os.path.dirname(os.path.realpath(sys.argv[0]))
-    results_folder = script_dir + "/results/hartmann6_1000/random_vs_dyadic/"
+    results_folder = script_dir + "/results/branin_1000/random_vs_dyadic/"
 
     if not os.path.exists(results_folder) :
         os.makedirs(results_folder)
     
     run_saasbo(
-        # hartmann6_50,
-        hartmann6_1000,
+        branin_1000,
         lb,
         ub,
-        max_evals = args.max_evals, # care about performance after initial stage only
-        num_init_evals = args.num_init_evals,
+        args.max_evals,
+        args.num_init_evals,
         results_folder = results_folder,
-        true_important_dims = [1, 7, 11, 23, 47, 33],
+        true_important_dims = [17, 876],
         perturb_dims_protocol = args.perturb_dims_protocol, 
         perturb_direction = args.perturb_direction,
         seed=args.seed,
@@ -48,7 +48,7 @@ def main(args):
         device=args.device,
         frac_perturb = args.frac_perturb_samples, 
         frac_perturb_dims = args.frac_perturb_dims
-        )
+    )
 
 
 if __name__ == "__main__":
@@ -66,7 +66,7 @@ if __name__ == "__main__":
         help = 'fraction of input dimensions to perturb at every function evaluation')
     parser.add_argument("--perturb_dims_protocol", default = 'random', type = str,
         help = 'protocol for choosing which dimensions to perturb')
-    parser.add_argument("--perturb_directions", default = ['ub_only', 'ub_and_lb'], type = str, nargs = '+', 
+    parser.add_argument("--perturb_directions", default = ['ub_only', 'ub_and_lb'], type = str, nargs='+', 
         help = 'directions in which to change the dimensions to perturb, can be ub_only or ub_and_lb')
 
     pargs = parser.parse_args()
@@ -78,15 +78,14 @@ if __name__ == "__main__":
     enable_x64()
     numpyro.set_host_device_count(1)
 
-    pool = Pool()
-
     args_iter = ((num_init_evals, num_init_evals, pargs.perturb_dims_protocol, perturb_direction, seed, pargs.device, f_p_samples, f_p_dims)
                     for num_init_evals in pargs.num_init_evals
                     for perturb_direction in pargs.perturb_directions
                     for seed in pargs.seeds
                     for f_p_samples in pargs.frac_perturb_samples
                     for f_p_dims in pargs.frac_perturb_dims)
-                
+    
+    pool = Pool()
     pool.starmap(wrapper, args_iter)
     pool.close()
     pool.join

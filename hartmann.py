@@ -28,3 +28,9 @@ def hartmann6(x):
 def hartmann6_50(x, embedding_idx=[1, 7, 11, 23, 47, 33]):
     assert x.shape == (50,)
     return hartmann6(x[embedding_idx])
+
+
+def hartmann6_1000(x, embedding_idx = [1, 7, 11, 23, 47, 33]):
+    assert x.shape == (1000,)
+    return hartmann6(x[embedding_idx])
+

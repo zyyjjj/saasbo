@@ -15,6 +15,7 @@ from scipy.stats import qmc
 import matplotlib
 import matplotlib.pyplot as plt
 import pdb
+import torch
 
 from saasgp import SAASGP
 
@@ -120,7 +121,7 @@ def generate_initial_evaluations(f,
                 avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
         
     if n_perturb_samples > 1:
-        avg_num_important_dims_perturbed /= n_perturb_samples - 1
+        avg_num_important_dims_perturbed /= (n_perturb_samples - 1)
 
     # generate the remaining samples from Sobol sequence
     with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
@@ -167,9 +168,8 @@ def run_saasbo(
     kernel="rbf",
     device="cpu",
     frac_perturb = None, 
-    frac_perturb_dims = None, 
-    plot_title = ''
-):
+    frac_perturb_dims = None
+    ):
     """
     Run SAASBO and approximately minimize f.
 
@@ -197,16 +197,15 @@ def run_saasbo(
         X: np.array containing all query points (of which there are max_evals many)
         Y: np.array containing all observed function evaluations (of which there are max_evals many)
     """
-    if max_evals <= num_init_evals:
-        raise ValueError("Must choose max_evals > num_init_evals.")
+
+    if max_evals < num_init_evals:
+        raise ValueError("Must choose max_evals >= num_init_evals.")
     if lb.shape != ub.shape or lb.ndim != 1:
         raise ValueError("The lower/upper bounds lb and ub must have the same shape and be D-dimensional vectors.")
     if alpha <= 0.0:
         raise ValueError("The hyperparameter alpha must be positive.")
     if device not in ["cpu", "gpu"]:
         raise ValueError("The device must be cpu or gpu.")
-
-    # plot_title += '\n fraction of initial samples perturbed: {}; \n fraction of input dimensions perturbed: {}'.format(frac_perturb, frac_perturb_dims)
 
     numpyro.set_platform(device)
     enable_x64()
@@ -218,20 +217,14 @@ def run_saasbo(
     ell_median_history = []
     ell_rank_history = []
 
-    # Initial queries are drawn from a Sobol sequence
-    # with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
-    #     X = qmc.Sobol(len(lb), scramble=True, seed=seed).random(num_init_evals)
-
-    # Y = np.array([f(lb + (ub - lb) * x) for x in X])
-
     # generate initial queries
-
     if perturb_dims_protocol == 'random':
         n_perturb_samples = int(num_init_evals * frac_perturb)
         n_sobol_samples = num_init_evals - int(num_init_evals * frac_perturb)
     elif perturb_dims_protocol == 'dyadic':
         n_perturb_samples = int(math.log2(len(lb))) + 2
         n_sobol_samples = 0
+        # TODO: look into this later -- number of initial samples for dyadic policy can also be tuned
 
     X, Y, avg_num_important_dims_perturbed = generate_initial_evaluations(
         f = f, 
@@ -248,128 +241,102 @@ def run_saasbo(
 
     print("Starting SAASBO optimization run.")
     print(f"First {len(Y)} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
-    # print(f"{int(num_init_evals * frac_perturb)} perturbed, average number of important dimensions perturbed is {avg_num_important_dims_perturbed}")
     print('protocol for selecting which dimensions to perturb: ', perturb_dims_protocol, ', perturb direction: ', perturb_direction)
 
+    num_evals = len(Y)
 
-    while len(Y) < max_evals:
-        print(f"=== Iteration {len(Y)} ===", flush=True)
+    while num_evals <= max_evals:
+        print(f"=== Number of function evaluations performed: {num_evals} ===", flush=True)
         # standardize training data
         train_Y = (Y - Y.mean()) / Y.std()
         y_target = train_Y.min().item()
+    
+        start = time.time()
+        # define GP with SAAS prior
+        gp = SAASGP(
+            alpha=alpha,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            max_tree_depth=6,
+            num_chains=1,
+            thinning=thinning,
+            verbose=False,
+            observation_variance=1e-6,
+            kernel=kernel,
+        )
 
-        # If for whatever reason we fail to return a query point above we choose one at random from the domain
-        try:
-            start = time.time()
-            # define GP with SAAS prior
-            gp = SAASGP(
-                alpha=alpha,
-                num_warmup=num_warmup,
-                num_samples=num_samples,
-                max_tree_depth=6,
-                num_chains=1,
-                thinning=thinning,
-                verbose=False,
-                observation_variance=1e-6,
-                kernel=kernel,
-            )
+        # fit SAAS GP to training data
+        gp = gp.fit(X, train_Y)
+        print(f"GP fitting took {time.time() - start:.2f} seconds")
 
-            # fit SAAS GP to training data
-            gp = gp.fit(X, train_Y)
-            print(f"GP fitting took {time.time() - start:.2f} seconds")
 
-            start = time.time()
-            # do EI optimization using LBFGS
-            x_next = optimize_ei(gp=gp, y_target=y_target, xi=0.0, num_restarts_ei=num_restarts_ei, num_init=5000)
-            print(f"Optimizing EI took {time.time() - start:.2f} seconds")
+        if num_evals < max_evals:
+            # use EI to generate a new point to evaluate
+            try:
+                start = time.time()
+                # do EI optimization using LBFGS
+                x_next = optimize_ei(gp=gp, y_target=y_target, xi=0.0, num_restarts_ei=num_restarts_ei, num_init=5000)
+                print(f"Optimizing EI took {time.time() - start:.2f} seconds")
 
-        except Exception:
-            num_exceptions += 1
-            if num_exceptions <= max_exceptions:
-                print("WARNING: Exception was raised, using a random point.")
-                x_next = np.random.rand(len(lb))
-            else:
-                raise RuntimeException("ERROR: Maximum number of exceptions raised!")
+            # If for whatever reason we fail to return a query point above we choose one at random from the domain
+            except Exception:
+                num_exceptions += 1
+                if num_exceptions <= max_exceptions:
+                    print("WARNING: Exception was raised, using a random point.")
+                    x_next = np.random.rand(len(lb))
+                else:
+                    raise RuntimeException("ERROR: Maximum number of exceptions raised!")
 
-        # transform to original coordinates
-        y_next = f(lb + (ub - lb) * x_next)
+            # transform to original coordinates
+            y_next = f(lb + (ub - lb) * x_next)
 
-        X = np.vstack((X, deepcopy(x_next[None, :])))
-        Y = np.hstack((Y, deepcopy(y_next)))
+            X = np.vstack((X, deepcopy(x_next[None, :])))
+            Y = np.hstack((Y, deepcopy(y_next)))
+            print(f"Observed function value: {y_next:.3f}, Best function value seen thus far: {Y.min():.3f}")
+
 
         # get the NUTS samples of inverse squared length scales for each dimension, thinned out
         ell = 1.0 / jnp.sqrt(gp.flat_samples["kernel_inv_length_sq"][::gp.thinning])
         # record important statistics: median, average rank of each dimension?
-        # pdb.set_trace()
         ell_median = jnp.median(ell, 0)
         ell_rank = jnp.argsort(ell).mean(0)
+
+        print('ell_median shape', ell_median.shape)
+        print('ell_rank shape', ell_rank.shape)
 
         ell_median_history.append(ell_median)
         ell_rank_history.append(ell_rank)
 
-        save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_important_dims_perturbed,
-            results_folder, seed, 
-            frac_perturb, frac_perturb_dims,
-            perturb_dims_protocol,
-            perturb_direction,
-            plot_title = plot_title)
+        if frac_perturb is not None:
+            frac_perturb_str = str(frac_perturb).replace('.', '')
+            frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
+            save_folder = results_folder + perturb_dims_protocol + '_' + \
+                'initevals=%d_frac_initevals_perturbed=%s_frac_dims_perturbed=%s/' \
+                    % (num_init_evals, frac_perturb_str, frac_perturb_dims_str)
+
+        else:
+            save_folder = results_folder + perturb_dims_protocol + '_' + \
+                'initevals=%d/' % (num_init_evals)
+        
+        if not os.path.exists(save_folder):
+            os.makedirs(save_folder)
+
+        out = dict()
+        out['X'] = X
+        out['Y'] = Y
+        out['median_lengthscales'] = ell_median_history
+        out['lengthscale_rankings'] = ell_rank_history
+        out['avg_num_important_dims_perturbed'] = avg_num_important_dims_perturbed
+
+        torch.save(out, save_folder + perturb_direction + str(seed))
         
         trace_important_dims(gp, thinning)
 
-        print(f"Observed function value: {y_next:.3f}, Best function value seen thus far: {Y.min():.3f}")
-
         del gp  # Free memory
 
+        num_evals += 1
+
     return lb + (ub - lb) * X, Y
-
-
-def save_outputs_and_plot(X, Y, ell_median_history, ell_rank_history, avg_num_important_dims_perturbed,
-        results_folder, seed, frac_perturb, frac_perturb_dims, 
-        perturb_dims_protocol,
-        perturb_direction,
-        to_plot=False, plot_title=None):
-    
-    if frac_perturb is not None:
-        frac_perturb_str = str(frac_perturb).replace('.', '')
-    else:
-        frac_perturb_str = ''
-    if frac_perturb_dims is not None:
-        frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
-    else:
-        frac_perturb_dims_str = ''
-
-    if not os.path.exists(results_folder + perturb_dims_protocol + frac_perturb_str + '_' + frac_perturb_dims_str + "/"):
-        os.makedirs(results_folder + perturb_dims_protocol + frac_perturb_str + '_' + frac_perturb_dims_str + "/")
-    save_folder = results_folder + perturb_dims_protocol + frac_perturb_str + '_' + frac_perturb_dims_str + "/" \
-        + perturb_direction + str(seed) + "/"
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
-    
-    np.save(save_folder + 'X_' + frac_perturb_str + '_' + frac_perturb_dims_str \
-        + '_' + str(seed) + '.npy', X)
-    np.save(save_folder + 'output_at_X_' + frac_perturb_str + '_' + frac_perturb_dims_str \
-        + '_' + str(seed)  + '.npy', Y)
-    np.save(save_folder + 'median_lengthscales_' + frac_perturb_str + '_' + frac_perturb_dims_str \
-        + '_' + str(seed)  + '.npy', ell_median_history)
-    np.save(save_folder + 'lengthscale_rankings_' + frac_perturb_str + '_' + frac_perturb_dims_str \
-        + '_' + str(seed)  + '.npy', ell_rank_history)
-    np.save(save_folder + 'avg_num_important_dims_perturbed_' + frac_perturb_str + '_' + frac_perturb_dims_str \
-        + '_' + str(seed)  + '.npy', avg_num_important_dims_perturbed)
-
-
-    if to_plot:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.plot(np.minimum.accumulate(Y), color="b", label="SAASBO")
-        ax.plot([0, 50], [-3.322, -3.322], "--", c="g", lw=3, label="Optimal value")
-        ax.grid(True)
-        if plot_title is not None:
-            ax.set_title(plot_title, fontsize=20)
-        ax.set_xlabel("Number of evaluations", fontsize=20)
-        ax.set_xlim([0, 100])
-        ax.set_ylabel("Best value found", fontsize=20)
-        ax.set_ylim([-3.5, -0.5])
-        ax.legend(fontsize=18)
-        fig.savefig(results_folder + 'visualization_' + str(seed)+ '_' + frac_perturb_str + '_' + frac_perturb_dims_str)
 
 def trace_important_dims(gp, thinning):
 
