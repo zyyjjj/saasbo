@@ -10,7 +10,7 @@ from multiprocessing import Pool
 from hartmann import hartmann6_50, hartmann6_1000
 from saasbo import run_saasbo
 
-def wrapper(num_init_evals, max_evals, perturb_dims_protocol, perturb_direction, seed, device, frac_perturb_samples, frac_perturb_dims):
+def wrapper(num_init_evals, max_evals, perturb_dims_protocol, perturb_direction, seed, device, frac_perturb_samples, frac_perturb_dims, thinning):
     args_dict = locals()
     print(args_dict)
     args = SimpleNamespace(**args_dict)
@@ -44,7 +44,7 @@ def main(args):
         alpha=0.01,
         num_warmup=256,
         num_samples=256,
-        thinning=32,
+        thinning=args.thinning,
         device=args.device,
         frac_perturb = args.frac_perturb_samples, 
         frac_perturb_dims = args.frac_perturb_dims
@@ -55,7 +55,8 @@ if __name__ == "__main__":
     # assert numpyro.__version__.startswith("0.7")
 
     parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
-    parser.add_argument("--seeds", default=[1,2,3,4,5], type=int, nargs = '+')
+    parser.add_argument("--seed_start", type=int)
+    parser.add_argument("--seed_end", type = int)    
     parser.add_argument("--max-evals", default=30, type=int)
     parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')
     parser.add_argument("--num_init_evals", default = [10, 20, 30], type = int, nargs = '+',
@@ -68,25 +69,33 @@ if __name__ == "__main__":
         help = 'protocol for choosing which dimensions to perturb')
     parser.add_argument("--perturb_directions", default = ['ub_only', 'ub_and_lb'], type = str, nargs = '+', 
         help = 'directions in which to change the dimensions to perturb, can be ub_only or ub_and_lb')
+    parser.add_argument("--thinning", default = 32, type = int,
+        help = 'thinning factor for NUTS samples')
+
 
     pargs = parser.parse_args()
     if pargs.perturb_dims_protocol == 'dyadic':
         pargs.frac_perturb_dims = [None]
         pargs.frac_perturb_samples = [None]
-        
+
+    seeds = list(range(pargs.seed_start, pargs.seed_end + 1)) 
+
     # numpyro.set_platform(args.device)
     enable_x64()
     numpyro.set_host_device_count(1)
 
     pool = Pool()
 
-    args_iter = ((num_init_evals, num_init_evals, pargs.perturb_dims_protocol, perturb_direction, seed, pargs.device, f_p_samples, f_p_dims)
+    args_iter = ((num_init_evals, num_init_evals, pargs.perturb_dims_protocol, perturb_direction, seed, pargs.device, f_p_samples, f_p_dims, pargs.thinning)
                     for num_init_evals in pargs.num_init_evals
                     for perturb_direction in pargs.perturb_directions
-                    for seed in pargs.seeds
+                    for seed in seeds
                     for f_p_samples in pargs.frac_perturb_samples
                     for f_p_dims in pargs.frac_perturb_dims)
                 
     pool.starmap(wrapper, args_iter)
     pool.close()
     pool.join
+
+    # command for running and debugging a single configuration:
+    # python saasbo_demo_hartmann6.py --seeds 11 --num_init_evals 10 --frac_perturb_samples 0 --frac_perturb_dims 0.1 --perturb_directions ub_only

@@ -39,7 +39,7 @@ def ei_grad(x, y_target, gp, xi=0.0):
     return ei(x, y_target, gp, xi).sum()
 
 
-def optimize_ei(gp, y_target, xi=0.0, num_restarts_ei=5, num_init=5000):
+def optimize_ei(gp, y_target, bounds, xi=0.0, num_restarts_ei=5, num_init=5000):
     # Helper function for optimizing EI
     def negative_ei_and_grad(x, y_target, gp, xi):
         # Compute EI and its gradient and then flip the signs since L-BFGS-B minimizes
@@ -66,7 +66,7 @@ def optimize_ei(gp, y_target, xi=0.0, num_restarts_ei=5, num_init=5000):
             func=negative_ei_and_grad,
             x0=x0,
             fprime=None,
-            bounds=[(0.0, 1.0) for _ in range(dim)],
+            bounds=bounds,
             args=(y_target, gp, 0.0),
             maxfun=100,  # this limits computational cost
         )
@@ -84,13 +84,15 @@ def generate_initial_evaluations(f,
         perturb_dims_protocol, # 'random' or 'dyadic'
         perturb_direction, # 'ub_only' or 'ub_and_lb'
         frac_perturb_dims,
-        n_perturb_samples = None, n_sobol_samples = None, # TODO: n_perturb_samples is fixed for the dyadic policy
+        n_perturb_samples = None, n_sobol_samples = None, 
         true_important_dims = None
         ):
-    
+
     input_dim = len(lb)
-    avg_num_important_dims_perturbed = 0
+    num_important_dims_perturbed = []
     X = None
+
+    np.random.seed(seed)
 
     if n_perturb_samples > 0:
     
@@ -109,7 +111,7 @@ def generate_initial_evaluations(f,
         
                 x = np.expand_dims(perturb_dims(x, lb, ub, dims_to_perturb, perturb_direction), 0)
                 X = np.vstack((X, x))
-                avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
+                num_important_dims_perturbed.append(len(set(dims_to_perturb).intersection(set(true_important_dims))))
 
         # if perturbation policy is dyadic, 
         elif perturb_dims_protocol == 'dyadic':
@@ -118,10 +120,8 @@ def generate_initial_evaluations(f,
                 x = (lb + ub)/2
                 x = np.expand_dims(perturb_dims(x, lb, ub, dims_to_perturb, perturb_direction), 0)
                 X = np.vstack((X, x))
-                avg_num_important_dims_perturbed += len(set(dims_to_perturb).intersection(set(true_important_dims)))
+                num_important_dims_perturbed.append(len(set(dims_to_perturb).intersection(set(true_important_dims))))
         
-    if n_perturb_samples > 1:
-        avg_num_important_dims_perturbed /= (n_perturb_samples - 1)
 
     # generate the remaining samples from Sobol sequence
     with warnings.catch_warnings(record=True):  # suppress annoying qmc.Sobol UserWarning
@@ -131,12 +131,14 @@ def generate_initial_evaluations(f,
         X = X_sobol
     else:
         X = np.vstack((X, X_sobol))
-    Y = np.array([f(lb + (ub - lb) * x) for x in X])
+    # Y = np.array([f(lb + (ub - lb) * x) for x in X])
+    Y = np.array([f(x) for x in X])
 
-    return X, Y, avg_num_important_dims_perturbed
+    return X, Y, num_important_dims_perturbed
 
 
 def perturb_dims(x, lb, ub, dims_to_perturb, perturb_direction):
+
     if perturb_direction == 'ub_and_lb':
         for dim_to_perturb in dims_to_perturb:
             if np.random.randint(0,2) == 0:
@@ -217,6 +219,8 @@ def run_saasbo(
     ell_median_history = []
     ell_rank_history = []
 
+    bounds = [(lb[i], ub[i]) for i in range(len(lb))]
+
     # generate initial queries
     if perturb_dims_protocol == 'random':
         n_perturb_samples = int(num_init_evals * frac_perturb)
@@ -226,7 +230,7 @@ def run_saasbo(
         n_sobol_samples = 0
         # TODO: look into this later -- number of initial samples for dyadic policy can also be tuned
 
-    X, Y, avg_num_important_dims_perturbed = generate_initial_evaluations(
+    X, Y, num_important_dims_perturbed = generate_initial_evaluations(
         f = f, 
         lb = lb, 
         ub = ub, 
@@ -239,14 +243,16 @@ def run_saasbo(
         true_important_dims = true_important_dims
         )
 
-    print("Starting SAASBO optimization run.")
-    print(f"First {len(Y)} queries drawn at random. Best minimum thus far: {Y.min().item():.3f}")
-    print('protocol for selecting which dimensions to perturb: ', perturb_dims_protocol, ', perturb direction: ', perturb_direction)
+    print(f"First {len(Y)} queries drawn at random, {n_perturb_samples} perturbed using {perturb_dims_protocol} policy in direction {perturb_direction}. Best minimum thus far: {Y.min().item():.3f} at index {np.argmin(Y)}",\
+        '\n generated Y values: ', Y,
+        '\n number of important dimensions perturbed: ', num_important_dims_perturbed
+        )
+
 
     num_evals = len(Y)
 
     while num_evals <= max_evals:
-        print(f"=== Number of function evaluations performed: {num_evals} ===", flush=True)
+        # print(f"=== Number of function evaluations performed: {num_evals} ===", flush=True)
         # standardize training data
         train_Y = (Y - Y.mean()) / Y.std()
         y_target = train_Y.min().item()
@@ -269,13 +275,12 @@ def run_saasbo(
         gp = gp.fit(X, train_Y)
         print(f"GP fitting took {time.time() - start:.2f} seconds")
 
-
         if num_evals < max_evals:
             # use EI to generate a new point to evaluate
             try:
                 start = time.time()
                 # do EI optimization using LBFGS
-                x_next = optimize_ei(gp=gp, y_target=y_target, xi=0.0, num_restarts_ei=num_restarts_ei, num_init=5000)
+                x_next = optimize_ei(gp=gp, y_target=y_target, bounds=bounds, xi=0.0, num_restarts_ei=num_restarts_ei, num_init=5000)
                 print(f"Optimizing EI took {time.time() - start:.2f} seconds")
 
             # If for whatever reason we fail to return a query point above we choose one at random from the domain
@@ -307,13 +312,13 @@ def run_saasbo(
         ell_median_history.append(ell_median)
         ell_rank_history.append(ell_rank)
 
+        # create directory for saving results
         if frac_perturb is not None:
             frac_perturb_str = str(frac_perturb).replace('.', '')
             frac_perturb_dims_str = str(frac_perturb_dims).replace('.', '')
             save_folder = results_folder + perturb_dims_protocol + '_' + \
                 'initevals=%d_frac_initevals_perturbed=%s_frac_dims_perturbed=%s/' \
                     % (num_init_evals, frac_perturb_str, frac_perturb_dims_str)
-
         else:
             save_folder = results_folder + perturb_dims_protocol + '_' + \
                 'initevals=%d/' % (num_init_evals)
@@ -321,12 +326,13 @@ def run_saasbo(
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
 
+        # save results in a dictionary 'out'
         out = dict()
         out['X'] = X
         out['Y'] = Y
         out['median_lengthscales'] = ell_median_history
         out['lengthscale_rankings'] = ell_rank_history
-        out['avg_num_important_dims_perturbed'] = avg_num_important_dims_perturbed
+        out['num_important_dims_perturbed'] = num_important_dims_perturbed
 
         torch.save(out, save_folder + perturb_direction + str(seed))
         

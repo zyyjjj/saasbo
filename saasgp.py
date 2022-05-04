@@ -62,6 +62,7 @@ class SAASGP(object):
         num_samples=256,  # number of post-warmup HMC samples
         max_tree_depth=7,  # max tree depth used in NUTS
         num_chains=1,  # number of MCMC chains
+        # TODO: decrease thinning? First understand what thinning does
         thinning=16,  # thinning > 1 reduces the computational cost at the risk of less robust model inferences
         verbose=True,  # whether to use stdout for verbose logging
         observation_variance=0.0,  # observation variance to use; this scalar value is inferred if observation_variance==0.0

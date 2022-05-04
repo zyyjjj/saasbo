@@ -55,7 +55,8 @@ if __name__ == "__main__":
     # assert numpyro.__version__.startswith("0.7")
 
     parser = argparse.ArgumentParser(description="We demonstrate how to run SAASBO.")
-    parser.add_argument("--seeds", default=[1,2,3,4,5], type=int, nargs = '+')
+    parser.add_argument("--seed_start", type=int)
+    parser.add_argument("--seed_end", type = int)
     parser.add_argument("--max-evals", default=30, type=int)
     parser.add_argument("--device", default="cpu", type=str, help='use "cpu" or "gpu".')
     parser.add_argument("--num_init_evals", default = [10, 20, 30], type = int, nargs = '+',
@@ -73,6 +74,8 @@ if __name__ == "__main__":
     if pargs.perturb_dims_protocol == 'dyadic':
         pargs.frac_perturb_dims = [None]
         pargs.frac_perturb_samples = [None]
+    
+    seeds = list(range(pargs.seed_start, pargs.seed_end + 1)) 
         
     # numpyro.set_platform(args.device)
     enable_x64()
@@ -81,7 +84,7 @@ if __name__ == "__main__":
     args_iter = ((num_init_evals, num_init_evals, pargs.perturb_dims_protocol, perturb_direction, seed, pargs.device, f_p_samples, f_p_dims)
                     for num_init_evals in pargs.num_init_evals
                     for perturb_direction in pargs.perturb_directions
-                    for seed in pargs.seeds
+                    for seed in seeds
                     for f_p_samples in pargs.frac_perturb_samples
                     for f_p_dims in pargs.frac_perturb_dims)
     
