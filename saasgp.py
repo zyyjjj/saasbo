@@ -96,6 +96,10 @@ class SAASGP(object):
     # define the surrogate model. users who want to modify e.g. the prior on the kernel variance
     # should make their modifications here.
     def model(self, X, Y):
+        """
+        INPUT: data X and observations Y
+        OUTPUT: f(X) | psi where psi is sampled from the prior
+        """
         N, P = X.shape
 
         var = numpyro.sample("kernel_var", dist.LogNormal(0.0, 10.0))
@@ -122,11 +126,20 @@ class SAASGP(object):
             num_chains=self.num_chains,
             progress_bar=self.verbose,
         )
-        mcmc.run(rng_key, X, Y)
+        mcmc.run(rng_key, X, Y, extra_fields=("potential_energy",)) 
+
+        flat_extra_fields = mcmc.get_extra_fields()
+        # print(mcmc.get_extra_fields()['potential_energy'])
 
         flat_samples = mcmc.get_samples(group_by_chain=False)
         chain_samples = mcmc.get_samples(group_by_chain=True)
         flat_summary = summary(flat_samples, prob=0.90, group_by_chain=False)
+        
+        # confirmed that potential energy is the negative log of the target density
+        # TODO: now to get something proportional to the likelihood of the observation, can do 
+        # exp(-potential_energy) / prior
+        # then, plot these values over the domain
+
 
         if self.verbose:
             rhat = flat_summary["kernel_inv_length_sq"]["r_hat"]
@@ -139,7 +152,7 @@ class SAASGP(object):
             mcmc.print_summary(exclude_deterministic=False)
             print("\nMCMC elapsed time:", time.time() - start)
 
-        return chain_samples, flat_samples, flat_summary
+        return chain_samples, flat_samples, flat_summary, flat_extra_fields
 
     # compute cholesky factorization of kernel matrices (necessary to compute posterior predictions)
     def compute_choleskys(self, chunk_size=8):
@@ -173,7 +186,7 @@ class SAASGP(object):
     def fit(self, X_train, Y_train, seed=0):
         self.X_train, self.Y_train = X_train.copy(), Y_train.copy()
         self.rng_key_hmc, self.rng_key_predict = random.split(random.PRNGKey(seed), 2)
-        self.chain_samples, self.flat_samples, self.summary = self.run_inference(self.rng_key_hmc, X_train, Y_train)
+        self.chain_samples, self.flat_samples, self.summary, self.flat_extra_fields = self.run_inference(self.rng_key_hmc, X_train, Y_train)
         return self
 
     # compute predictions at X_test using inferred SAAS hyperparameters
